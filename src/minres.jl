@@ -17,6 +17,7 @@ mutable struct MINRESIterable{matT, solT, vecT <: DenseVector, smallVecT <: Dens
     alphas::vecT
     betas::vecT
     Wortho
+    reorth::Bool
 
     # W = R * inv(V) is computed using 3-term recurrence
     w_prev::vecT
@@ -45,7 +46,8 @@ function minres_iterable!(x, A, b;
     initially_zero::Bool = false,
     skew_hermitian::Bool = false,
     tol = sqrt(eps(real(eltype(b)))),
-    maxiter = size(A, 2)
+    maxiter = size(A, 2),
+    reorth::Bool = false,
 )
     T = eltype(x)
     HessenbergT = skew_hermitian ? T : real(T)
@@ -92,7 +94,7 @@ function minres_iterable!(x, A, b;
     MINRESIterable(
         A, skew_hermitian, x,
         v_prev, v_curr, v_next,
-        V, alphas, betas, Wortho,
+        V, alphas, betas, Wortho, reorth,
         w_prev, w_curr, w_next,
         H, rhs,
         c_prev, s_prev, c_curr, s_curr,
@@ -142,19 +144,66 @@ function iterate(m::MINRESIterable, iteration::Int=start(m))
     #     end
     # end
 
-    if iteration > 5
-        for i in 1:(iteration - 3)
-            tmp = view(m.V, :, i)
-            proj = dot(tmp, m.v_next)
-            axpy!(-proj, view(m.V, :, i), m.v_next)
+
+    norm_old = norm(m.v_next)
+    # @show norm_old
+    num_repeats = 0
+    # implement reorthogonalization
+    if m.reorth && iteration > 4
+        while true
+            # use modified Gram Schmidt
+            for i in 1:(iteration - 3)
+                tmp = view(m.V, :, i)
+                proj = dot(tmp, m.v_next)
+                axpy!(-proj, view(m.V, :, i), m.v_next)
+            end
+            # @show dot(m.v_prev, m.v_next)
+
+            # # TODO exclude last two? if we don't, do we update H2 and H3?
+            # axpy!(-m.H[2], m.v_prev, m.v_next)
+            # m.H[3] = dot(m.v_curr, m.v_next)
+            # axpy!(-m.H[3], m.v_curr, m.v_next)
+
+            norm_new = norm(m.v_next)
+            # @show norm_new / norm_old, norm_old
+            # the norm has decreased substantially, so repeat reorthogonalization
+            if norm_new < 0.5 * norm_old
+                num_repeats += 1
+                norm_old = norm_new
+                # already repeated, so v_next = 0
+                if num_repeats > 4
+                    println("reorthogonalized four times already.")
+                    m.v_next .= 0
+                    break
+                end
+            else
+                # reorthogonalization didn't alter v_next too much
+                break
+            end
         end
     end
 
+    # if m.reorth && iteration > 5
+    #     norm_old = norm(m.v_next)
+    #     if iteration > 5
+    #         for i in 1:(iteration - 3)
+    #             tmp = view(m.V, :, i)
+    #             proj = dot(tmp, m.v_next)
+    #             # @show proj
+    #             axpy!(-proj, view(m.V, :, i), m.v_next)
+    #         end
+    #     end
+    #     @show norm_old / norm(m.v_next)
+    # end
+
     # Normalize
     m.H[4] = norm(m.v_next)
-    rmul!(m.v_next, inv(m.H[4]))
+    if !(iszero(m.H[4]))
+        rmul!(m.v_next, inv(m.H[4]))
+    end
 
     # Rotation on H[1] and H[2]. Note that H[1] = 0 initially
+    # TODO would this break things if we started with the correct solution?
     if iteration > 2
         m.H[1] = m.s_prev * m.H[2]
         m.H[2] = m.c_prev * m.H[2]
@@ -239,7 +288,8 @@ function minres!(x, A, b;
     log::Bool = false,
     tol = sqrt(eps(real(eltype(b)))),
     maxiter::Int = size(A, 2),
-    initially_zero::Bool = false
+    initially_zero::Bool = false,
+    reorth::Bool = false,
 )
     history = ConvergenceHistory(partial = !log)
     history[:tol] = tol
@@ -249,7 +299,8 @@ function minres!(x, A, b;
         skew_hermitian = skew_hermitian,
         tol = tol,
         maxiter = maxiter,
-        initially_zero = initially_zero
+        initially_zero = initially_zero,
+        reorth = reorth,
     )
 
     if log
@@ -277,3 +328,14 @@ end
 Same as [`minres!`](@ref), but allocates a solution vector `x` initialized with zeros.
 """
 minres(A, b; kwargs...) = minres!(zerox(A, b), A, b; initially_zero = true, kwargs...)
+
+# using IterativeSolvers, Random, LinearAlgebra
+# n = 15
+# A = randn(n, n);
+# A = Symmetric(A);
+# x = randn(n)
+# b = A * x
+# sol = minres(A, b);
+# norm(b - A * sol)
+# sol = minres(A, b, reorth = true);
+# norm(b - A * sol)
