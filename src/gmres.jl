@@ -120,7 +120,7 @@ function gmres_iterable!(x, A, b;
     residual.current = init!(arnoldi, x, b, Pl, Ax, initially_zero = initially_zero)
     init_residual!(residual, residual.current)
 
-    reltol = tol * residual.current + atol
+    reltol = rtol * residual.current + atol
 
     GMRESIterable(Pl, Pr, x, b, Ax,
         arnoldi, residual,
