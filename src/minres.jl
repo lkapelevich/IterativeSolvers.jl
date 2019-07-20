@@ -2,6 +2,7 @@ export minres_iterable, minres, minres!
 using Printf
 import LinearAlgebra: BLAS.axpy!, givensAlgorithm
 import Base: iterate
+using TimerOutputs
 
 mutable struct MINRESIterable{matT, solT, vecT <: DenseVector, smallVecT <: DenseVector, rotT <: Number, realT <: Real}
     A::matT
@@ -28,6 +29,7 @@ mutable struct MINRESIterable{matT, solT, vecT <: DenseVector, smallVecT <: Dens
     # rhs is just two active values of the right-hand side.
     H::smallVecT
     rhs::smallVecT
+    b
 
     # Some Givens rotations
     c_prev::rotT
@@ -45,7 +47,8 @@ end
 function minres_iterable!(x, A, b;
     initially_zero::Bool = false,
     skew_hermitian::Bool = false,
-    tol = sqrt(eps(real(eltype(b)))),
+    rtol = sqrt(eps(real(eltype(b)))),
+    atol = sqrt(eps(real(eltype(b)))),
     maxiter = size(A, 2),
     reorth::Bool = false,
 )
@@ -60,9 +63,9 @@ function minres_iterable!(x, A, b;
     w_curr = similar(x)
     w_next = similar(x)
 
-    V = zeros(T, size(A))
-    alphas = zeros(T, size(A, 2))
-    betas = zeros(T, size(A, 2))
+    V = zeros(T, size(A, 1), maxiter)
+    alphas = zeros(T, maxiter)
+    betas = zeros(T, maxiter)
     Wortho = zeros(T, size(A))
     Wortho[1, 1] = 1
 
@@ -77,7 +80,8 @@ function minres_iterable!(x, A, b;
     end
 
     resnorm = norm(v_curr)
-    reltol = resnorm * tol
+    # reltol = norm(b) * rtol
+    reltol = resnorm * rtol + atol
 
     # Last active column of the Hessenberg matrix
     # and last two entries of the right-hand side
@@ -96,7 +100,7 @@ function minres_iterable!(x, A, b;
         v_prev, v_curr, v_next,
         V, alphas, betas, Wortho, reorth,
         w_prev, w_curr, w_next,
-        H, rhs,
+        H, rhs, b,
         c_prev, s_prev, c_curr, s_curr,
         mv_products, maxiter, reltol, resnorm
     )
@@ -112,21 +116,27 @@ function iterate(m::MINRESIterable, iteration::Int=start(m))
     if done(m, iteration) return nothing end
 
     # v_next = A * v_curr - H[2] * v_prev
-    mul!(m.v_next, m.A, m.v_curr)
+    # @show typeof(m.v_next)
+    # @show typeof(m.A)
+    # @show typeof(m.v_curr)
+    # @show which(, (m.v_nextm.A, m.v_curr))
+    @timeit "vnext" mul!(m.v_next, m.A, m.v_curr)
 
     if iteration > 1
         m.V[:, iteration - 1] .= m.v_curr
     end
 
-    iteration > 1 && axpy!(-m.H[2], m.v_prev, m.v_next)
+    @timeit "axpy" iteration > 1 && axpy!(-m.H[2], m.v_prev, m.v_next)
 
     # Orthogonalize w.r.t. v_curr
-    proj = dot(m.v_curr, m.v_next)
+    @timeit "proj" proj = dot(m.v_curr, m.v_next)
     m.H[3] = m.skew_hermitian ? proj : real(proj)
-    axpy!(-proj, m.v_curr, m.v_next)
+    @timeit "axpy" axpy!(-proj, m.v_curr, m.v_next)
 
     m.alphas[iteration] = proj
     m.betas[iteration] = norm(m.v_next)
+
+    # @show norm(m.b - m.A * m.v_curr)
 
     # pert = eps() * norm(A)
     # if iteration < m.maxiter
@@ -152,7 +162,7 @@ function iterate(m::MINRESIterable, iteration::Int=start(m))
     if m.reorth && iteration > 4
         while true
             # use modified Gram Schmidt
-            for i in 1:(iteration - 3)
+            @timeit "reorth" for i in 1:(iteration - 3)
                 tmp = view(m.V, :, i)
                 proj = dot(tmp, m.v_next)
                 axpy!(-proj, view(m.V, :, i), m.v_next)
@@ -199,7 +209,7 @@ function iterate(m::MINRESIterable, iteration::Int=start(m))
     # Normalize
     m.H[4] = norm(m.v_next)
     if !(iszero(m.H[4]))
-        rmul!(m.v_next, inv(m.H[4]))
+        @timeit "normalize" rmul!(m.v_next, inv(m.H[4]))
     end
 
     # Rotation on H[1] and H[2]. Note that H[1] = 0 initially
@@ -217,7 +227,7 @@ function iterate(m::MINRESIterable, iteration::Int=start(m))
     end
 
     # Next rotation
-    c, s, m.H[3] = givensAlgorithm(m.H[3], m.H[4])
+    @timeit "givens" c, s, m.H[3] = givensAlgorithm(m.H[3], m.H[4])
 
     # Apply as well to the right-hand side
     m.rhs[2] = -conj(s) * m.rhs[1]
@@ -225,12 +235,12 @@ function iterate(m::MINRESIterable, iteration::Int=start(m))
 
     # Update W = V * inv(R). Two axpy's can maybe be one MV.
     copyto!(m.w_next, m.v_curr)
-    iteration > 1 && axpy!(-m.H[2], m.w_curr, m.w_next)
-    iteration > 2 && axpy!(-m.H[1], m.w_prev, m.w_next)
-    rmul!(m.w_next, inv(m.H[3]))
+    @timeit "axpyH" iteration > 1 && axpy!(-m.H[2], m.w_curr, m.w_next)
+    @timeit "axpyH" iteration > 2 && axpy!(-m.H[1], m.w_prev, m.w_next)
+    @timeit "rmul" rmul!(m.w_next, inv(m.H[3]))
 
     # Update solution x
-    axpy!(m.rhs[1], m.w_next, m.x)
+    @timeit "update" axpy!(m.rhs[1], m.w_next, m.x)
 
     # Move on: next -> curr, curr -> prev
     m.v_prev, m.v_curr, m.v_next = m.v_curr, m.v_next, m.v_prev
@@ -243,6 +253,7 @@ function iterate(m::MINRESIterable, iteration::Int=start(m))
 
     # The approximate residual is cheaply available
     m.resnorm = abs(m.rhs[2])
+    # m.resnorm = norm(m.b - m.A *  m.v_curr)
 
     m.resnorm, iteration + 1
 end
@@ -286,18 +297,22 @@ function minres!(x, A, b;
     skew_hermitian::Bool = false,
     verbose::Bool = false,
     log::Bool = false,
-    tol = sqrt(eps(real(eltype(b)))),
+    rtol = sqrt(eps(real(eltype(b)))),
+    atol = sqrt(eps(real(eltype(b)))),
     maxiter::Int = size(A, 2),
     initially_zero::Bool = false,
     reorth::Bool = false,
 )
+    reset_timer!()
     history = ConvergenceHistory(partial = !log)
-    history[:tol] = tol
-    log && reserve!(history, :resnorm, maxiter)
+    history[:tol] = rtol
+    @timeit "logging" log && reserve!(history, :resnorm, maxiter)
+
 
     iterable = minres_iterable!(x, A, b;
         skew_hermitian = skew_hermitian,
-        tol = tol,
+        rtol = rtol,
+        atol = atol,
         maxiter = maxiter,
         initially_zero = initially_zero,
         reorth = reorth,
@@ -307,10 +322,11 @@ function minres!(x, A, b;
         history.mvps = iterable.mv_products
     end
 
-    for (iteration, resnorm) = enumerate(iterable)
+
+    @timeit "iterating" for (iteration, resnorm) = enumerate(iterable)
         if log
             nextiter!(history, mvps = 1)
-            push!(history, :resnorm, resnorm)
+            @timeit "logging" push!(history, :resnorm, resnorm)
         end
         verbose && @printf("%3d\t%1.2e\n", iteration, resnorm)
     end

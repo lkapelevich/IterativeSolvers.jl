@@ -102,7 +102,8 @@ end
 function gmres_iterable!(x, A, b;
     Pl = Identity(),
     Pr = Identity(),
-    tol = sqrt(eps(real(eltype(b)))),
+    rtol = sqrt(eps(real(eltype(b)))),
+    atol = sqrt(eps(real(eltype(b)))),
     restart::Int = min(20, size(A, 2)),
     maxiter::Int = size(A, 2),
     initially_zero::Bool = false
@@ -119,7 +120,7 @@ function gmres_iterable!(x, A, b;
     residual.current = init!(arnoldi, x, b, Pl, Ax, initially_zero = initially_zero)
     init_residual!(residual, residual.current)
 
-    reltol = tol * residual.current
+    reltol = tol * residual.current + atol
 
     GMRESIterable(Pl, Pr, x, b, Ax,
         arnoldi, residual,
@@ -172,7 +173,8 @@ Solves the problem ``Ax = b`` with restarted GMRES.
 function gmres!(x, A, b;
   Pl = Identity(),
   Pr = Identity(),
-  tol = sqrt(eps(real(eltype(b)))),
+  rtol = sqrt(eps(real(eltype(b)))),
+  atol = sqrt(eps(real(eltype(b)))),
   restart::Int = min(20, size(A, 2)),
   maxiter::Int = size(A, 2),
   log::Bool = false,
@@ -180,10 +182,10 @@ function gmres!(x, A, b;
   verbose::Bool = false
 )
     history = ConvergenceHistory(partial = !log, restart = restart)
-    history[:tol] = tol
+    history[:tol] = rtol
     log && reserve!(history, :resnorm, maxiter)
 
-    iterable = gmres_iterable!(x, A, b; Pl = Pl, Pr = Pr, tol = tol, maxiter = maxiter, restart = restart, initially_zero = initially_zero)
+    iterable = gmres_iterable!(x, A, b; Pl = Pl, Pr = Pr, rtol = rtol, atol = atol, maxiter = maxiter, restart = restart, initially_zero = initially_zero)
 
     verbose && @printf("=== gmres ===\n%4s\t%4s\t%7s\n","rest","iter","resnorm")
 
